@@ -1,6 +1,6 @@
 // Razer Battery Lite - Windows 10/11, C++14, Unicode.
 // Lightweight Chinese tray battery monitor for Razer DeathAdder V3 Pro.
-// v1.1: mouse silhouette + numeric level, charging bolt, accurate status.
+// v1.2: color-coded realistic mouse icon; charging bolt; Windows 11-style popup.
 // Protocol knowledge acknowledged in README and NOTICE.
 #ifndef UNICODE
 #define UNICODE
@@ -11,6 +11,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <setupapi.h>
 #include <hidsdi.h>
@@ -29,21 +31,21 @@
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 namespace
 {
     constexpr UINT kTrayId = 1;
     constexpr UINT kTrayMessage = WM_APP + 1;
     constexpr UINT kBatteryMessage = WM_APP + 2;
-    constexpr UINT kRefreshCommand = 1001;
-    constexpr UINT kStartupCommand = 1002;
-    constexpr UINT kAboutCommand = 1003;
-    constexpr UINT kExitCommand = 1004;
     constexpr wchar_t kClassName[] = L"RazerBatteryLite.HiddenWindow";
+    constexpr wchar_t kMenuClassName[] = L"RazerBatteryLite.FluentMenu";
     constexpr wchar_t kStartupName[] = L"RazerBatteryLite";
     constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
     HWND gWindow = nullptr;
+    HWND gMenuWindow = nullptr;
+    int gMenuHover = -1;
     HICON gIcon = nullptr;
     HANDLE gStopEvent = nullptr;
     HANDLE gWakeEvent = nullptr;
@@ -303,7 +305,9 @@ namespace
         LONG result = RegQueryValueExW(key, kStartupName, nullptr, &type,
                                        reinterpret_cast<BYTE *>(value), &size);
         RegCloseKey(key);
-        return result == ERROR_SUCCESS && type == REG_SZ && value[0] != L'\0';
+        const std::wstring current = L"\"" + ExecutablePath() + L"\"";
+        return result == ERROR_SUCCESS && type == REG_SZ &&
+               _wcsicmp(current.c_str(), value) == 0;
     }
 
     bool SetStartup(bool enable)
@@ -330,17 +334,6 @@ namespace
         return result == ERROR_SUCCESS;
     }
 
-    // Windows taskbar can be light or dark; normal icons should remain legible.
-    bool SystemUsesLightTaskbar()
-    {
-        DWORD value = 0, size = sizeof(value);
-        return RegGetValueW(HKEY_CURRENT_USER,
-                            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                            L"SystemUsesLightTheme", RRF_RT_REG_DWORD,
-                            nullptr, &value, &size) == ERROR_SUCCESS &&
-               value != 0;
-    }
-
     std::wstring StatusLabel(int level, ChargeState charge)
     {
         if (level < 0)
@@ -352,8 +345,74 @@ namespace
         return L"充电状态未知";
     }
 
-    // Render white geometry and text on a transparent 64x64 canvas, then tint its
-    // coverage into premultiplied BGRA. This needs no icon assets or GDI+ runtime.
+    // Colors show battery LEVEL, never charging state. Red always wins below 20%.
+    // The large bolt alone distinguishes charging from ordinary use.
+    COLORREF BatteryColor(int level)
+    {
+        if (level < 0)
+            return RGB(148, 153, 164);
+        if (level < 20)
+            return RGB(244, 68, 84); // red: 0..19
+        if (level < 40)
+            return RGB(247, 152, 49); // orange: 20..39
+        if (level < 60)
+            return RGB(235, 194, 43); // yellow: 40..59
+        if (level < 80)
+            return RGB(155, 214, 67); // lime: 60..79
+        return RGB(42, 202, 114);     // green: 80..100
+    }
+
+    bool IsCharging(int level, ChargeState charge)
+    {
+        return level >= 0 && charge == ChargeState::Charging;
+    }
+
+    // A mouse outline with a narrower bottom, curved shoulders and a real wheel.
+    // Charging replaces the wheel with a large, solid lightning bolt, never a logo.
+    // All drawing is white; the caller tints the anti-aliased pixels by battery color.
+    void DrawMouseShape(HDC dc, bool charging)
+    {
+        HPEN contour = CreatePen(PS_SOLID, 5, RGB(255, 255, 255));
+        HPEN thin = CreatePen(PS_SOLID, 3, RGB(255, 255, 255));
+        HGDIOBJ oldPen = SelectObject(dc, contour);
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        POINT outline[] = {
+            {32, 3}, {17, 3}, {9, 12}, {9, 27}, {9, 42}, {11, 57}, {27, 61}, {32, 62}, {37, 62}, {37, 61}, {53, 57}, {55, 42}, {55, 27}, {55, 12}, {47, 3}, {32, 3}};
+        // 5 cubic Bezier segments (3*n+1 points) making a closed tapered outline.
+        PolyBezier(dc, outline, 16);
+
+        SelectObject(dc, thin);
+        if (charging)
+        {
+            // High-contrast, large solid bolt: nearly half the mouse's height.
+            POINT bolt[] = {
+                {37, 10}, {22, 35}, {31, 34}, {28, 54}, {44, 29}, {35, 30}, {43, 10}};
+            HBRUSH solid = CreateSolidBrush(RGB(255, 255, 255));
+            SelectObject(dc, solid);
+            Polygon(dc, bolt, static_cast<int>(sizeof(bolt) / sizeof(bolt[0])));
+            SelectObject(dc, GetStockObject(NULL_BRUSH));
+            DeleteObject(solid);
+        }
+        else
+        {
+            // Curved seam between left/right mouse buttons, and short wheel.
+            MoveToEx(dc, 14, 26, nullptr);
+            LineTo(dc, 50, 26);
+            MoveToEx(dc, 32, 4, nullptr);
+            LineTo(dc, 32, 12);
+            HBRUSH wheel = CreateSolidBrush(RGB(255, 255, 255));
+            SelectObject(dc, wheel);
+            RoundRect(dc, 29, 13, 35, 24, 6, 6);
+            SelectObject(dc, GetStockObject(NULL_BRUSH));
+            DeleteObject(wheel);
+        }
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        DeleteObject(thin);
+        DeleteObject(contour);
+    }
+
+    // Render at 64x64 for high-DPI taskbars; Windows scales it to tray size.
     HICON MakeMouseIcon(int level, ChargeState charge)
     {
         constexpr int side = 64;
@@ -381,83 +440,12 @@ namespace
         }
         std::fill_n(static_cast<BYTE *>(pixels), side * side * 4, BYTE{0});
         HGDIOBJ oldBitmap = SelectObject(memory, color);
-        HGDIOBJ oldBrush = SelectObject(memory, GetStockObject(NULL_BRUSH));
-        HPEN pen = CreatePen(PS_SOLID, 5, RGB(255, 255, 255));
-        HGDIOBJ oldPen = SelectObject(memory, pen);
         SetBkMode(memory, TRANSPARENT);
-        SetTextColor(memory, RGB(255, 255, 255));
+        DrawMouseShape(memory, IsCharging(level, charge));
+        GdiFlush();
 
-        // Vertical pill-shaped mouse outline.
-        RoundRect(memory, 9, 3, 55, 61, 46, 46);
-        // Wheel marker; replace this line with a lightning stroke while charging.
-        if (charge == ChargeState::Charging && level >= 0)
-        {
-            POINT bolt[] = {{36, 10}, {30, 18}, {37, 18}, {33, 27}, {43, 16}, {36, 16}};
-            for (int i = 0; i < 5; ++i)
-            {
-                MoveToEx(memory, bolt[i].x, bolt[i].y, nullptr);
-                LineTo(memory, bolt[i + 1].x, bolt[i + 1].y);
-            }
-        }
-        else
-        {
-            MoveToEx(memory, 32, 11, nullptr);
-            LineTo(memory, 32, 24);
-        }
-
-        // 100% uses smaller text, so all digits stay inside the silhouette.
-        const std::wstring text = level < 0 ? L"--" : std::to_wstring(level);
-        HFONT font = CreateFontW(text.size() == 3 ? -23 : -31, 0, 0, 0, FW_BOLD,
-                                 FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                 CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS,
-                                 L"Arial");
-        if (font)
-        {
-            HGDIOBJ oldFont = SelectObject(memory, font);
-            RECT area{11, 29, 53, 56};
-            DrawTextW(memory, text.c_str(), -1, &area,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(memory, oldFont);
-            DeleteObject(font);
-        }
-        SelectObject(memory, oldPen);
-        SelectObject(memory, oldBrush);
-        DeleteObject(pen);
-        GdiFlush(); // Ensure all drawing has reached the DIB before reading pixels.
-
-        BYTE red = 214, green = 222, blue = 230; // neutral on dark taskbar
-        if (SystemUsesLightTaskbar())
-        {
-            red = 67;
-            green = 75;
-            blue = 86;
-        }
-        if (level < 0)
-        {
-            red = 150;
-            green = 150;
-            blue = 150;
-        }
-        else if (charge == ChargeState::Charging ||
-                 (level == 100 && charge == ChargeState::NotCharging))
-        {
-            red = 34;
-            green = 176;
-            blue = 112;
-        }
-        else if (level <= 10)
-        {
-            red = 239;
-            green = 69;
-            blue = 69;
-        }
-        else if (level <= 20)
-        {
-            red = 235;
-            green = 167;
-            blue = 51;
-        }
-
+        const COLORREF tint = BatteryColor(level);
+        const BYTE red = GetRValue(tint), green = GetGValue(tint), blue = GetBValue(tint);
         auto *bgra = static_cast<BYTE *>(pixels);
         for (int i = 0; i < side * side; ++i)
         {
@@ -468,7 +456,6 @@ namespace
             bgra[i * 4 + 3] = opacity;
         }
 
-        // AND-mask must be entirely clear when using an ARGB icon.
         BYTE maskPixels[side * ((side + 31) / 32) * 4]{};
         HBITMAP mask = CreateBitmap(side, side, 1, 1, maskPixels);
         ICONINFO iconInfo{};
@@ -484,7 +471,6 @@ namespace
         DeleteObject(color);
         return icon ? icon : CopyIcon(LoadIconW(nullptr, IDI_APPLICATION));
     }
-
     void UpdateTray(bool add)
     {
         if (!gWindow)
@@ -530,30 +516,366 @@ namespace
         gIcon = nullptr;
     }
 
-    void ShowMenu(HWND window)
+    // A minimal owner-painted popup instead of the legacy Win32 context menu.
+    // Runs only when right-clicked; no WebView, Qt or background UI thread.
+    struct MenuPalette
     {
-        HMENU menu = CreatePopupMenu();
-        if (!menu)
+        COLORREF background, text, muted, separator, hover, border;
+    };
+
+    bool LightAppTheme()
+    {
+        DWORD value = 0, size = sizeof(value);
+        return RegGetValueW(HKEY_CURRENT_USER,
+                            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                            L"AppsUseLightTheme", RRF_RT_REG_DWORD,
+                            nullptr, &value, &size) == ERROR_SUCCESS &&
+               value != 0;
+    }
+
+    MenuPalette MenuColors()
+    {
+        if (LightAppTheme())
+        {
+            return {RGB(250, 250, 253), RGB(35, 38, 45), RGB(107, 111, 122),
+                    RGB(223, 225, 231), RGB(232, 235, 242), RGB(214, 217, 225)};
+        }
+        return {RGB(33, 35, 43), RGB(242, 244, 248), RGB(173, 181, 194),
+                RGB(68, 73, 84), RGB(54, 59, 71), RGB(80, 85, 98)};
+    }
+
+    UINT MenuDpi()
+    {
+        return gMenuWindow ? GetDpiForWindow(gMenuWindow) : 96;
+    }
+
+    int Scale(int value)
+    {
+        return MulDiv(value, static_cast<int>(MenuDpi()), 96);
+    }
+
+    RECT MenuRect(int left, int top, int right, int bottom)
+    {
+        return RECT{Scale(left), Scale(top), Scale(right), Scale(bottom)};
+    }
+
+    void FillSolid(HDC dc, RECT rect, COLORREF color)
+    {
+        HBRUSH brush = CreateSolidBrush(color);
+        FillRect(dc, &rect, brush);
+        DeleteObject(brush);
+    }
+
+    void RoundedFill(HDC dc, RECT rect, COLORREF color, int radius)
+    {
+        HBRUSH brush = CreateSolidBrush(color);
+        HGDIOBJ oldBrush = SelectObject(dc, brush);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom,
+                  Scale(radius), Scale(radius));
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(brush);
+    }
+
+    HFONT MenuFont(int height, int weight)
+    {
+        return CreateFontW(-Scale(height), 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    }
+
+    void MenuText(HDC dc, const std::wstring &value, RECT area,
+                  HFONT font, COLORREF color, UINT flags = DT_LEFT)
+    {
+        HGDIOBJ oldFont = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, color);
+        DrawTextW(dc, value.c_str(), -1, &area,
+                  flags | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, oldFont);
+    }
+
+    // Menu rows: refresh, startup switch, about, exit.
+    int MenuRowAt(POINT point)
+    {
+        const int x = MulDiv(point.x, 96, static_cast<int>(MenuDpi()));
+        const int y = MulDiv(point.y, 96, static_cast<int>(MenuDpi()));
+        if (x < 12 || x >= 288)
+            return -1;
+        if (y >= 129 && y < 170)
+            return 0;
+        if (y >= 171 && y < 212)
+            return 1;
+        if (y >= 226 && y < 267)
+            return 2;
+        if (y >= 268 && y < 309)
+            return 3;
+        return -1;
+    }
+
+    void PaintMenu(HWND window)
+    {
+        PAINTSTRUCT paint{};
+        HDC target = BeginPaint(window, &paint);
+        RECT client{};
+        GetClientRect(window, &client);
+        HDC dc = CreateCompatibleDC(target);
+        HBITMAP bmp = CreateCompatibleBitmap(target,
+                                             client.right - client.left, client.bottom - client.top);
+        if (!dc || !bmp)
+        {
+            if (bmp)
+                DeleteObject(bmp);
+            if (dc)
+                DeleteDC(dc);
+            EndPaint(window, &paint);
             return;
-        const std::wstring levelText = gBattery < 0 ? L"电量：--"
-                                                    : L"电量：" + std::to_wstring(gBattery) + L"%";
-        const std::wstring statusText = L"状态：" + StatusLabel(gBattery, gCharge);
-        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, levelText.c_str());
-        AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, statusText.c_str());
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kRefreshCommand, L"立即刷新");
-        AppendMenuW(menu, MF_STRING | (IsStartupOn() ? MF_CHECKED : 0),
-                    kStartupCommand, L"开机自动启动");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kAboutCommand, L"关于");
-        AppendMenuW(menu, MF_STRING, kExitCommand, L"退出");
-        POINT pos{};
-        GetCursorPos(&pos);
-        SetForegroundWindow(window);
-        TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN,
-                       pos.x, pos.y, 0, window, nullptr);
-        PostMessageW(window, WM_NULL, 0, 0);
-        DestroyMenu(menu);
+        }
+        HGDIOBJ oldBmp = SelectObject(dc, bmp);
+        const auto theme = MenuColors();
+        FillSolid(dc, client, theme.background);
+        // Thin inset border and gently rounded rows resemble Win11 menu surfaces.
+        HPEN frame = CreatePen(PS_SOLID, 1, theme.border);
+        HGDIOBJ oldPen = SelectObject(dc, frame);
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, Scale(1), Scale(1), client.right - Scale(1),
+                  client.bottom - Scale(1), Scale(18), Scale(18));
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        DeleteObject(frame);
+
+        HFONT titleFont = MenuFont(17, FW_SEMIBOLD);
+        HFONT labelFont = MenuFont(13, FW_NORMAL);
+        HFONT actionFont = MenuFont(14, FW_NORMAL);
+        HFONT levelFont = MenuFont(25, FW_SEMIBOLD);
+        if (!titleFont || !labelFont || !actionFont || !levelFont)
+        {
+            if (titleFont)
+                DeleteObject(titleFont);
+            if (labelFont)
+                DeleteObject(labelFont);
+            if (actionFont)
+                DeleteObject(actionFont);
+            if (levelFont)
+                DeleteObject(levelFont);
+            SelectObject(dc, oldBmp);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            EndPaint(window, &paint);
+            return;
+        }
+
+        // Tiny mouse emblem in the header, with no vendor logo.
+        const COLORREF accent = BatteryColor(gBattery);
+        HPEN mousePen = CreatePen(PS_SOLID, Scale(2), accent);
+        HGDIOBJ mouseOldPen = SelectObject(dc, mousePen);
+        HGDIOBJ mouseOldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, Scale(21), Scale(18), Scale(51), Scale(65), Scale(22), Scale(22));
+        if (IsCharging(gBattery, gCharge))
+        {
+            POINT bolt[] = {{36, 25}, {30, 39}, {36, 38}, {33, 52}, {43, 35}, {37, 36}, {41, 25}};
+            for (auto &p : bolt)
+            {
+                p.x = Scale(p.x);
+                p.y = Scale(p.y);
+            }
+            HBRUSH boltBrush = CreateSolidBrush(accent);
+            SelectObject(dc, boltBrush);
+            Polygon(dc, bolt, 7);
+            SelectObject(dc, GetStockObject(NULL_BRUSH));
+            DeleteObject(boltBrush);
+        }
+        else
+        {
+            MoveToEx(dc, Scale(36), Scale(23), nullptr);
+            LineTo(dc, Scale(36), Scale(35));
+        }
+        SelectObject(dc, mouseOldBrush);
+        SelectObject(dc, mouseOldPen);
+        DeleteObject(mousePen);
+
+        MenuText(dc, L"RazerBatteryLite", MenuRect(67, 15, 280, 40),
+                 titleFont, theme.text);
+        MenuText(dc, L"DeathAdder V3 Pro", MenuRect(68, 41, 280, 63),
+                 labelFont, theme.muted);
+        const std::wstring percent = gBattery < 0 ? L"--" : std::to_wstring(gBattery) + L"%";
+        MenuText(dc, percent, MenuRect(19, 76, 129, 111), levelFont, accent);
+        MenuText(dc, StatusLabel(gBattery, gCharge), MenuRect(131, 80, 287, 107),
+                 labelFont, theme.muted, DT_RIGHT | DT_END_ELLIPSIS);
+
+        FillSolid(dc, MenuRect(17, 117, 283, 118), theme.separator);
+        FillSolid(dc, MenuRect(17, 219, 283, 220), theme.separator);
+
+        const int tops[] = {129, 171, 226, 268};
+        const wchar_t *captions[] = {L"立即刷新", L"开机自启动", L"关于", L"退出程序"};
+        const wchar_t *glyphs[] = {L"↻", L"⏻", L"ⓘ", L"×"};
+        for (int i = 0; i < 4; ++i)
+        {
+            if (gMenuHover == i)
+                RoundedFill(dc, MenuRect(12, tops[i], 288, tops[i] + 40), theme.hover, 10);
+            MenuText(dc, glyphs[i], MenuRect(27, tops[i] + 2, 54, tops[i] + 39),
+                     titleFont, theme.muted);
+            MenuText(dc, captions[i], MenuRect(63, tops[i] + 2, 225, tops[i] + 39),
+                     actionFont, theme.text);
+        }
+        // Compact Windows 11-inspired switch; checking the registry reflects the
+        // exact installed EXE path, not a stale path from an older release.
+        const bool enabled = IsStartupOn();
+        const RECT switchRect = MenuRect(246, 183, 280, 202);
+        RoundedFill(dc, switchRect, enabled ? RGB(29, 114, 224) : theme.separator, 18);
+        const int knobX = enabled ? 269 : 256;
+        RECT knob = MenuRect(knobX - 7, 185, knobX + 7, 200);
+        HBRUSH knobBrush = CreateSolidBrush(RGB(255, 255, 255));
+        HGDIOBJ previousBrush = SelectObject(dc, knobBrush);
+        HGDIOBJ previousPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
+        SelectObject(dc, previousPen);
+        SelectObject(dc, previousBrush);
+        DeleteObject(knobBrush);
+
+        DeleteObject(titleFont);
+        DeleteObject(labelFont);
+        DeleteObject(actionFont);
+        DeleteObject(levelFont);
+        BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, oldBmp);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        EndPaint(window, &paint);
+    }
+
+    void HideMenu()
+    {
+        if (gMenuWindow)
+            ShowWindow(gMenuWindow, SW_HIDE);
+        gMenuHover = -1;
+    }
+
+    void PerformMenuCommand(int row)
+    {
+        HideMenu();
+        switch (row)
+        {
+        case 0:
+            if (gWakeEvent)
+                SetEvent(gWakeEvent);
+            break;
+        case 1:
+            if (!SetStartup(!IsStartupOn()))
+            {
+                MessageBoxW(gWindow, L"无法修改开机自启动设置。请检查账户权限。",
+                            L"蝰蛇电量 Lite", MB_OK | MB_ICONWARNING);
+            }
+            break;
+        case 2:
+            MessageBoxW(gWindow,
+                        L"RazerBatteryLite v1.2.0\n雷蛇炼狱蝰蛇 V3 Pro 电量托盘工具\n\n"
+                        L"图标颜色表示电量，低于 20% 为红色。\n"
+                        L"滚轮表示使用状态，闪电表示正在充电。\n"
+                        L"悬停可查看准确百分比；每 30 秒自动刷新。\n\n"
+                        L"开机自启使用当前 EXE 路径，不会关闭 Windows 安全保护。\n"
+                        L"协议及开源许可说明见 README 和 NOTICE。",
+                        L"关于 RazerBatteryLite", MB_OK | MB_ICONINFORMATION);
+            break;
+        case 3:
+            if (gWindow)
+                DestroyWindow(gWindow);
+            break;
+        }
+    }
+
+    LRESULT CALLBACK MenuWindowProc(HWND window, UINT msg, WPARAM w, LPARAM l)
+    {
+        switch (msg)
+        {
+        case WM_PAINT:
+            PaintMenu(window);
+            return 0;
+        case WM_MOUSEMOVE:
+        {
+            POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            const int row = MenuRowAt(p);
+            if (row != gMenuHover)
+            {
+                gMenuHover = row;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+            TrackMouseEvent(&tracking);
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            gMenuHover = -1;
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONUP:
+        {
+            POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            const int row = MenuRowAt(p);
+            if (row >= 0)
+                PerformMenuCommand(row);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (w == VK_ESCAPE)
+                HideMenu();
+            else if (w == VK_DOWN || w == VK_UP)
+            {
+                gMenuHover = (gMenuHover < 0) ? 0 : (gMenuHover + (w == VK_DOWN ? 1 : 3)) % 4;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            else if ((w == VK_RETURN || w == VK_SPACE) && gMenuHover >= 0)
+            {
+                PerformMenuCommand(gMenuHover);
+            }
+            return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(w) == WA_INACTIVE)
+                HideMenu();
+            return 0;
+        case WM_DPICHANGED:
+        {
+            const RECT *area = reinterpret_cast<const RECT *>(l);
+            SetWindowPos(window, nullptr, area->left, area->top,
+                         area->right - area->left, area->bottom - area->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            InvalidateRect(window, nullptr, TRUE);
+            return 0;
+        }
+        }
+        return DefWindowProcW(window, msg, w, l);
+    }
+
+    void ShowMenu(HWND owner)
+    {
+        (void)owner;
+        if (!gMenuWindow)
+            return;
+        const int width = Scale(300), height = Scale(319);
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        MONITORINFO monitor{sizeof(monitor)};
+        const HMONITOR screen = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        if (!GetMonitorInfoW(screen, &monitor))
+            return;
+        int left = cursor.x;
+        int top = cursor.y - height;
+        const RECT work = monitor.rcWork;
+        if (left + width > work.right)
+            left = work.right - width;
+        if (left < work.left)
+            left = work.left;
+        if (top < work.top)
+            top = cursor.y + Scale(4);
+        if (top + height > work.bottom)
+            top = work.bottom - height;
+        gMenuHover = -1;
+        InvalidateRect(gMenuWindow, nullptr, TRUE);
+        SetWindowPos(gMenuWindow, HWND_TOPMOST, left, top, width, height,
+                     SWP_SHOWWINDOW);
+        SetForegroundWindow(gMenuWindow); // Allows Escape & click-outside dismissal.
+        SetFocus(gMenuWindow);
     }
 
     void ReadWorker()
@@ -582,7 +904,9 @@ namespace
         switch (message)
         {
         case WM_SETTINGCHANGE:
-            UpdateTray(false); // Repaint when Windows taskbar light/dark mode changes.
+            UpdateTray(false);
+            if (gMenuWindow)
+                InvalidateRect(gMenuWindow, nullptr, TRUE);
             return 0;
         case kBatteryMessage:
         {
@@ -602,33 +926,13 @@ namespace
             else if ((lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) && gWakeEvent)
                 SetEvent(gWakeEvent);
             return 0;
-        case WM_COMMAND:
-            switch (LOWORD(wParam))
-            {
-            case kRefreshCommand:
-                if (gWakeEvent)
-                    SetEvent(gWakeEvent);
-                break;
-            case kStartupCommand:
-                if (!SetStartup(!IsStartupOn()))
-                    MessageBoxW(window, L"无法修改开机启动设置。", L"蝰蛇电量 Lite", MB_OK | MB_ICONWARNING);
-                break;
-            case kAboutCommand:
-                MessageBoxW(window,
-                            L"蝰蛇电量 Lite v1.1.0\n专用于雷蛇炼狱蝰蛇 V3 Pro\n\n"
-                            L"鼠标轮廓显示电量；顶部闪电代表正在充电。\n"
-                            L"电量 <= 20% 显示橙色，<= 10% 显示红色。\n"
-                            L"每 30 秒刷新，可左键单击立即刷新。\n"
-                            L"充电状态读取失败时显示未知，不影响电量。\n\n"
-                            L"无需联网或 Razer Synapse。\n协议参考和开源声明见 README、NOTICE。",
-                            L"关于 · 蝰蛇电量 Lite", MB_OK | MB_ICONINFORMATION);
-                break;
-            case kExitCommand:
-                DestroyWindow(window);
-                break;
-            }
-            return 0;
         case WM_DESTROY:
+            HideMenu();
+            if (gMenuWindow)
+            {
+                DestroyWindow(gMenuWindow);
+                gMenuWindow = nullptr;
+            }
             RemoveTray();
             PostQuitMessage(0);
             return 0;
@@ -639,6 +943,8 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
+    // Follow the DPI of the monitor hosting the tray popup (Windows 10/11).
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     gSingleton = CreateMutexW(nullptr, TRUE, L"Local\\RazerBatteryLite.DeathAdderV3Pro");
     if (!gSingleton)
         return 1;
@@ -660,10 +966,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     windowClass.lpszClassName = kClassName;
     if (!RegisterClassW(&windowClass))
         return 3;
+    WNDCLASSW menuClass{};
+    menuClass.lpfnWndProc = MenuWindowProc;
+    menuClass.hInstance = instance;
+    menuClass.lpszClassName = kMenuClassName;
+    menuClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    if (!RegisterClassW(&menuClass))
+        return 3;
+    gMenuWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                                  kMenuClassName, L"RazerBatteryLite", WS_POPUP,
+                                  0, 0, 1, 1, nullptr, nullptr, instance, nullptr);
+    if (!gMenuWindow)
+        return 4;
+    // Window 11: rounded corners & matching dark/light chrome. No added UI library.
+    const int roundCorner = 2; // DWMWCP_ROUND
+    DwmSetWindowAttribute(gMenuWindow, static_cast<DWMWINDOWATTRIBUTE>(33),
+                          &roundCorner, sizeof(roundCorner));
+    const BOOL darkMode = !LightAppTheme();
+    DwmSetWindowAttribute(gMenuWindow, static_cast<DWMWINDOWATTRIBUTE>(20),
+                          &darkMode, sizeof(darkMode));
     gWindow = CreateWindowExW(WS_EX_TOOLWINDOW, kClassName, L"RazerBatteryLite", 0,
                               0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
     if (!gWindow)
+    {
+        DestroyWindow(gMenuWindow);
         return 4;
+    }
     // CreateWindowExW sends WM_CREATE before gWindow has been assigned.
     // Add the icon here so that it is visible even when the first query fails.
     UpdateTray(true);
