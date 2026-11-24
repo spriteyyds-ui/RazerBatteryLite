@@ -4,18 +4,24 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'res/**'
+      - 'build.bat'
       - '.github/workflows/windows.yml'
+
 jobs:
   build:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - name: Build MSVC release
+      - name: Build MSVC release with embedded icons
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           if not exist dist mkdir dist
-          cl /nologo /std:c++14 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /utf-8 /Fe:dist\RazerBatteryLite.exe src\RazerBatteryLite.cpp /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib setupapi.lib hid.lib advapi32.lib
+          rc /nologo /I res /fo dist\RazerBatteryLite.res res\icons.rc
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++14 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /utf-8 /Ires /Fe:dist\RazerBatteryLite.exe src\RazerBatteryLite.cpp dist\RazerBatteryLite.res /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib setupapi.lib hid.lib advapi32.lib dwmapi.lib
+          if errorlevel 1 exit /b 1
       - uses: actions/upload-artifact@v4
         with:
           name: RazerBatteryLite-Windows-x64

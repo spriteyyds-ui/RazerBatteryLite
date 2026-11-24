@@ -1,0 +1,14 @@
+// Generated resource IDs for embedded Plan B icons.
+#pragma once
+
+#define IDI_NORMAL_GREEN 101
+#define IDI_NORMAL_LIME 102
+#define IDI_NORMAL_YELLOW 103
+#define IDI_NORMAL_ORANGE 104
+#define IDI_NORMAL_RED 105
+#define IDI_CHARGING_GREEN 106
+#define IDI_CHARGING_LIME 107
+#define IDI_CHARGING_YELLOW 108
+#define IDI_CHARGING_ORANGE 109
+#define IDI_CHARGING_RED 110
+#define IDI_UNKNOWN 111

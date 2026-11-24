@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64">
+  <title>RazerBatteryLite - mouse in use</title>
+  <path d="M 32 5.4 C 42.4 5.4 50.8 13.3 50.8 24.2 L 50.8 40.1 C 50.8 51.4 42.4 58.9 32 58.9 C 21.6 58.9 13.2 51.4 13.2 40.1 L 13.2 24.2 C 13.2 13.3 21.6 5.4 32 5.4 Z" fill="none" stroke="#FF8E37" stroke-width="3.65" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 32 13.0 L 32 20.9" stroke="#FF8E37" stroke-width="4.1" stroke-linecap="round"/>
+</svg>

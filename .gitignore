@@ -1,0 +1,9 @@
+dist/
+*.obj
+*.pdb
+*.ilk
+*.res
+.vs/
+x64/
+Debug/
+Release/

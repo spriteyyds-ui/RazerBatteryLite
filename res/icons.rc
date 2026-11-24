@@ -1,0 +1,14 @@
+#include "resource.h"
+
+// Keep files as ICO so Windows can select the closest native tray DPI size.
+IDI_NORMAL_GREEN ICON "res\\icons\\normal_green.ico"
+IDI_NORMAL_LIME ICON "res\\icons\\normal_lime.ico"
+IDI_NORMAL_YELLOW ICON "res\\icons\\normal_yellow.ico"
+IDI_NORMAL_ORANGE ICON "res\\icons\\normal_orange.ico"
+IDI_NORMAL_RED ICON "res\\icons\\normal_red.ico"
+IDI_CHARGING_GREEN ICON "res\\icons\\charging_green.ico"
+IDI_CHARGING_LIME ICON "res\\icons\\charging_lime.ico"
+IDI_CHARGING_YELLOW ICON "res\\icons\\charging_yellow.ico"
+IDI_CHARGING_ORANGE ICON "res\\icons\\charging_orange.ico"
+IDI_CHARGING_RED ICON "res\\icons\\charging_red.ico"
+IDI_UNKNOWN ICON "res\\icons\\unknown.ico"
